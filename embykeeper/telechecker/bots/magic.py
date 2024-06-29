@@ -1,8 +1,6 @@
 from pyrogram.types import Message
 
-from .base import BotCheckin
-
-__ignore__ = True
+from ._base import BotCheckin
 
 
 class MagicCheckin(BotCheckin):

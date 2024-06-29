@@ -1,4 +1,4 @@
-from .base import BotCheckin
+from ._base import BotCheckin
 
 __ignore__ = True
 
@@ -9,3 +9,4 @@ class AISGKCheckin(BotCheckin):
     bot_checkin_cmd = "/sign"
     additional_auth = ["prime"]
     bot_checked_keywords = "请勿重复签到"
+    checked_retries = 6

@@ -4,14 +4,14 @@ from pyrogram.enums import MessageEntityType
 from pyrogram.errors import RPCError
 
 from ..lock import pornemby_messager_enabled, pornemby_alert
-from .base import Monitor
+from ._base import Monitor
 
 
 class PornembyDoubleMonitor(Monitor):
     name = "Pornemby 怪兽自动翻倍"
     chat_user = "PronembyTGBot2_bot"
     chat_name = "Pornemby"
-    chat_keyword = "击杀者\s+(.*)\s+是否要奖励翻倍"
+    chat_keyword = r"击杀者\s+(.*)\s+是否要奖励翻倍"
     additional_auth = ["pornemby_pack"]
     allow_edit = True
 

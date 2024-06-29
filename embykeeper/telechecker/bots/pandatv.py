@@ -1,13 +1,14 @@
 from pyrogram.types import Message
 from pyrogram.raw.types.messages import BotCallbackAnswer
 
-from .base import BotCheckin
+from ._base import BotCheckin
 
 
 class PandaTVCheckin(BotCheckin):
     name = "PandaTV"
     bot_username = "PandaTV_Emby_Bot"
     bot_checkin_cmd = "/start"
+    checked_retries = 6
 
     async def message_handler(self, client, message: Message):
         if message.text and "主面板" in message.text and message.reply_markup:

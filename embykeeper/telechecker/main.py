@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime
 from functools import lru_cache
@@ -16,7 +18,8 @@ from . import __name__ as __product__
 from .link import Link
 from .log import TelegramStream
 from .tele import ClientsSession
-from .bots.base import BaseBotCheckin
+
+from .bots._base import BaseBotCheckin, CheckinResult
 
 logger = logger.bind(scheme="telegram")
 
@@ -49,7 +52,7 @@ def get_names(type: str, allow_ignore=False) -> List[str]:
             if not getattr(module, "__ignore__", False):
                 results.append(mn)
         else:
-            if (not mn == "base") and (not mn == "test"):
+            if (not mn == "_base") and (not mn == "test"):
                 results.append(mn)
     return results
 
@@ -105,6 +108,7 @@ async def checkiner(config: dict, instant=False):
         coros = []
         async for tg in clients:
             log = logger.bind(scheme="telechecker", username=tg.me.name)
+            logger.info("已连接到 Telegram, 签到器正在初始化.")
             if not await Link(tg).auth("checkiner"):
                 log.error(f"功能初始化失败: 权限校验不通过.")
                 continue
@@ -119,6 +123,7 @@ async def checkiner(config: dict, instant=False):
                     basedir=config.get("basedir", None),
                     proxy=config.get("proxy", None),
                     config=config.get("checkiner", {}).get(cls.__module__.rsplit(".", 1)[-1], {}),
+                    instant=instant,
                 )
                 for cls in clses
             ]
@@ -143,22 +148,31 @@ async def checkiner(config: dict, instant=False):
                 failed = []
                 ignored = []
                 successful = []
+                checked = []
                 for i, c in enumerate(checkiners):
-                    if results[i] == False:
-                        failed.append(c)
-                    elif results[i] is None:
+                    if results[i] == CheckinResult.IGNORE:
                         ignored.append(c)
-                    else:
+                    elif results[i] == CheckinResult.SUCCESS:
                         successful.append(c)
+                    elif results[i] == CheckinResult.CHECKED:
+                        checked.append(c)
+                    else:
+                        failed.append(c)
                 spec = f"共{len(checkiners)}个"
                 if successful:
                     spec += f", {len(successful)}成功"
+                if checked:
+                    spec += f", {len(checked)}已签到而跳过"
                 if failed:
                     spec += f", {len(failed)}失败"
                 if ignored:
                     spec += f", {len(ignored)}跳过"
                 if failed:
-                    log.error(f"签到失败 ({spec}): {', '.join([f.name for f in failed])}")
+                    if successful:
+                        msg = "签到部分失败"
+                    else:
+                        msg = "签到失败"
+                    log.error(f"{msg} ({spec}): {', '.join([f.name for f in failed])}")
                 else:
                     log.bind(notify=True).info(f"签到成功 ({spec}).")
 
@@ -179,6 +193,7 @@ async def monitorer(config: dict):
     async with ClientsSession.from_config(config, monitor=True) as clients:
         async for tg in clients:
             log = logger.bind(scheme="telemonitor", username=tg.me.name)
+            logger.info("已连接到 Telegram, 监控器正在初始化.")
             if not await Link(tg).auth("monitorer"):
                 log.error(f"功能初始化失败: 权限校验不通过.")
                 continue
@@ -204,12 +219,13 @@ async def monitorer(config: dict):
 
 
 async def messager(config: dict):
-    """自动回复器入口函数."""
+    """自动水群入口函数."""
     logger.debug("正在启动自动水群模块.")
     messagers = []
     async with ClientsSession.from_config(config, send=True) as clients:
         async for tg in clients:
             log = logger.bind(scheme="telemessager", username=tg.me.name)
+            logger.info("已连接到 Telegram, 自动水群正在初始化.")
             if not await Link(tg).auth("messager"):
                 log.error(f"功能初始化失败: 权限校验不通过.")
                 continue

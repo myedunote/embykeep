@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import binascii
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 import uuid
@@ -29,13 +30,16 @@ from pyrogram.errors import (
     SessionPasswordNeeded,
     CodeInvalid,
     PhoneCodeInvalid,
+    BadMsgNotification,
 )
 from pyrogram.handlers import MessageHandler, RawUpdateHandler, DisconnectHandler
 from pyrogram.handlers.handler import Handler
 from aiocache import Cache
+import aiohttp
+from aiohttp_socks import ProxyConnector, ProxyType, ProxyConnectionError, ProxyTimeoutError
 
-from .. import var, __name__, __version__
-from ..utils import async_partial, show_exception, to_iterable
+from embykeeper import var, __name__ as __product__, __version__
+from embykeeper.utils import async_partial, show_exception, to_iterable
 
 logger = logger.bind(scheme="telegram")
 
@@ -167,6 +171,9 @@ class Dispatcher(dispatcher.Dispatcher):
                             logger.error(f"更新回调函数内发生错误.")
                             show_exception(e, regular=False)
                         break
+                    else:
+                        continue
+                    break
             except pyrogram.StopPropagation:
                 pass
             except TimeoutError:
@@ -222,6 +229,10 @@ class Client(pyrogram.Client):
                     except BadRequest:
                         self.password = None
                         retry = True
+            except Exception as e:
+                logger.error(f"登录时出现异常错误!")
+                show_exception(e, regular=False)
+                retry = True
             else:
                 break
         if isinstance(signed_in, types.User):
@@ -407,6 +418,8 @@ class Client(pyrogram.Client):
                             )
                         except ChannelPrivate:
                             pass
+                        except ValueError:
+                            pass
                         except OSError:
                             logger.info("网络不稳定, 可能遗漏消息.")
                         else:
@@ -447,7 +460,7 @@ class ClientsSession:
     watch = None
 
     @classmethod
-    def from_config(cls, config, in_memory=False, quiet=False, **kw):
+    def from_config(cls, config, in_memory=True, quiet=False, **kw):
         accounts = config.get("telegram", [])
         for k, v in kw.items():
             accounts = [a for a in accounts if a.get(k, None) in to_iterable(v)]
@@ -527,16 +540,76 @@ class ClientsSession:
                 await client.storage.close()
                 logger.debug(f'登出账号 "{client.phone_number}".')
 
-    def __init__(self, accounts, proxy=None, basedir=None, in_memory=None, quiet=False):
+    def __init__(self, accounts, proxy=None, basedir=None, in_memory=True, quiet=False):
         self.accounts = accounts
         self.proxy = proxy
-        self.basedir = basedir or user_data_dir(__name__)
+        self.basedir = basedir or user_data_dir(__product__)
         self.phones = []
         self.done = asyncio.Queue()
         self.in_memory = in_memory
         self.quiet = quiet
         if not self.watch:
             self.__class__.watch = asyncio.create_task(self.watchdog())
+
+    def get_connector(self, proxy=None):
+        if proxy:
+            connector = ProxyConnector(
+                proxy_type=ProxyType[proxy["scheme"].upper()],
+                host=proxy["hostname"],
+                port=proxy["port"],
+                username=proxy.get("username", None),
+                password=proxy.get("password", None),
+            )
+        else:
+            connector = aiohttp.TCPConnector()
+        return connector
+
+    async def test_network(self, proxy=None):
+        url = "https://www.gstatic.com/generate_204"
+        connector = self.get_connector(proxy=proxy)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 204:
+                        return True
+                    else:
+                        logger.warning(f"检测网络状态时发生错误, 网络检测将被跳过.")
+                        return False
+            except (ProxyConnectionError, ProxyTimeoutError) as e:
+                un = connector._proxy_username
+                pw = connector._proxy_password
+                auth = f"{un}:{pw}@" if un or pw else ""
+                proxy_url = f"{connector._proxy_type.name.lower()}://{auth}{connector._proxy_host}:{connector._proxy_port}"
+                logger.warning(
+                    f"无法连接到您的代理 ({proxy_url}), 您的网络状态可能不好, 敬请注意. 程序将继续运行."
+                )
+            except OSError as e:
+                logger.warning(f"无法连接到网络 (Google), 您的网络状态可能不好, 敬请注意. 程序将继续运行.")
+                return False
+            except Exception as e:
+                logger.warning(f"检测网络状态时发生错误, 网络检测将被跳过.")
+                show_exception(e)
+                return False
+
+    async def test_time(self, proxy=None):
+        url = "http://worldtimeapi.org/api/timezone/Etc/UTC"
+        connector = self.get_connector(proxy=proxy)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        resp_dict: dict = await resp.json()
+                    else:
+                        raise RuntimeError()
+                unixtime = int(resp_dict.get("unixtime", None))
+                nowtime = datetime.now().timestamp()
+                if abs(nowtime - unixtime) > 30:
+                    logger.warning(
+                        f"您的系统时间设置不正确, 与世界时间差距过大, 可能会导致连接失败失败, 敬请注意. 程序将继续运行."
+                    )
+            except Exception:
+                logger.warning(f"检测世界时间发生错误, 时间检测将被跳过.")
+                return False
 
     async def login(self, account, proxy):
         try:
@@ -549,11 +622,12 @@ class ClientsSession:
             for _ in range(3):
                 if account.get("api_id", None) is None or account.get("api_hash", None) is None:
                     account.update(random.choice(list(API_KEY.values())))
-                session_string = account.get("session", None)
+                config_session_string = session_string = account.get("session", None)
+                file_session_string = None
                 if not session_string:
                     if session_string_file.is_file():
                         with open(session_string_file, encoding="utf-8") as f:
-                            session_string = f.read().strip()
+                            file_session_string = session_string = f.read().strip()
                 if self.in_memory is None:
                     in_memory = True
                     if not session_string:
@@ -563,6 +637,14 @@ class ClientsSession:
                     in_memory = True
                 else:
                     in_memory = self.in_memory
+                if session_string or session_file.is_file():
+                    logger.debug(
+                        f'账号 "{account["phone"]}" 登录凭据存在, 仅内存模式{"启用" if in_memory else "禁用"}.'
+                    )
+                else:
+                    logger.debug(
+                        f'账号 "{account["phone"]}" 登录凭据不存在, 即将进入登录流程, 仅内存模式{"启用" if in_memory else "禁用"}.'
+                    )
                 try:
                     client = Client(
                         app_version=__version__,
@@ -577,21 +659,42 @@ class ClientsSession:
                         workdir=self.basedir,
                         sleep_threshold=30,
                     )
-                    await client.start()
-                except OperationalError:
+                    try:
+                        await asyncio.wait_for(client.start(), 120)
+                    except asyncio.TimeoutError:
+                        if proxy:
+                            logger.error(f"无法连接到 Telegram 服务器, 请检查您代理的可用性.")
+                            continue
+                        else:
+                            logger.error(f"无法连接到 Telegram 服务器, 请检查您的网络.")
+                            continue
+                except OperationalError as e:
                     logger.warning(f"内部数据库错误, 正在重置, 您可能需要重新登录.")
+                    show_exception(e)
                     session_file.unlink(missing_ok=True)
                 except ApiIdPublishedFlood:
                     logger.warning(f'登录账号 "{account["phone"]}" 时发生 API key 限制, 将被跳过.')
-                    logger.warning(
-                        f"请您申请自己的 API, 参考: https://blog.iair.top/2023/10/15/embykeeper-api."
-                    )
                     break
-                except Unauthorized:
-                    try:
+                except Unauthorized as e:
+                    if config_session_string:
+                        logger.error(
+                            f'账号 "{account["phone"]}" 由于配置中提供的 session 已被注销, 将被跳过.'
+                        )
+                        show_exception(e)
+                        break
+                    elif file_session_string:
+                        logger.error(f'账号 "{account["phone"]}" 已被注销, 将在 3 秒后重新登录.')
+                        show_exception(e)
+                        session_string_file.unlink(missing_ok=True)
+                        continue
+                    elif client.in_memory:
+                        logger.error(f'账号 "{account["phone"]}" 已被注销, 将在 3 秒后重新登录.')
+                        show_exception(e)
+                        continue
+                    else:
+                        logger.error(f'账号 "{account["phone"]}" 已被注销, 将在 3 秒后重新登录.')
+                        show_exception(e)
                         await client.storage.delete()
-                    except:
-                        pass
                 except KeyError as e:
                     logger.warning(
                         f'登录账号 "{account["phone"]}" 时发生异常, 可能是由于网络错误, 将在 3 秒后重试.'
@@ -602,13 +705,30 @@ class ClientsSession:
                     break
             else:
                 logger.error(f'登录账号 "{account["phone"]}" 失败次数超限, 将被跳过.')
+                return None
         except asyncio.CancelledError:
             raise
+        except binascii.Error:
+            logger.error(
+                f'登录账号 "{account["phone"]}" 失败, 由于您在配置文件中提供的 session 无效, 将被跳过.'
+            )
         except RPCError as e:
             logger.error(f'登录账号 "{account["phone"]}" 失败 ({e.MESSAGE.format(value=e.value)}), 将被跳过.')
+            return None
+        except BadMsgNotification as e:
+            if "synchronized" in str(e):
+                logger.error(
+                    f'登录账号 "{account["phone"]}" 时发生异常, 可能是因为您的系统时间与世界时间差距过大, 将被跳过.'
+                )
+                return None
+            else:
+                logger.error(f'登录账号 "{account["phone"]}" 时发生异常, 将被跳过.')
+                show_exception(e, regular=False)
+                return None
         except Exception as e:
             logger.error(f'登录账号 "{account["phone"]}" 时发生异常, 将被跳过.')
             show_exception(e, regular=False)
+            return None
         else:
             if not session_string_file.exists():
                 with open(session_string_file, "w+", encoding="utf-8") as f:
@@ -629,6 +749,8 @@ class ClientsSession:
             await self.done.put(None)
 
     async def __aenter__(self):
+        await self.test_network(self.proxy)
+        asyncio.create_task(self.test_time(self.proxy))
         for a in self.accounts:
             phone = a["phone"]
             try:
